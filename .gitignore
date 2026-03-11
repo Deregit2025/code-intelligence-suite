@@ -1,0 +1,146 @@
+# ==============================
+
+# Python
+
+# ==============================
+
+**pycache**/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+*.pyo
+
+# Python virtual environments
+
+.env
+.venv
+venv/
+ENV/
+env/
+
+# Poetry
+
+poetry.lock
+.poetry/
+
+# ==============================
+
+# Build / Distribution
+
+# ==============================
+
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ==============================
+
+# Logs
+
+# ==============================
+
+*.log
+logs/
+*.out
+
+# ==============================
+
+# Jupyter
+
+# ==============================
+
+.ipynb_checkpoints
+
+# ==============================
+
+# Testing / Coverage
+
+# ==============================
+
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+
+# ==============================
+
+# IDEs / Editors
+
+# ==============================
+
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# ==============================
+
+# OS Files
+
+# ==============================
+
+.DS_Store
+Thumbs.db
+
+# ==============================
+
+# Cartographer Generated Artifacts
+
+# ==============================
+
+.cartography/
+*.jsonl
+semantic_index/
+
+# ==============================
+
+# LLM / Model Cache
+
+# ==============================
+
+*.bin
+*.model
+*.pt
+*.safetensors
+.cache/
+
+# ==============================
+
+# Temporary Files
+
+# ==============================
+
+*.tmp
+*.temp
+*.bak
+*.swp
+
+# ==============================
+
+# Docker
+
+# ==============================
+
+docker-compose.override.yml
+
+# ==============================
+
+# Airflow
+
+# ==============================
+
+airflow.db
+airflow-webserver.pid
+airflow-scheduler.pid
+
+# ==============================
+
+# Node (in case repo contains JS DAG utilities)
+
+# ==============================
+
+node_modules/
+npm-debug.log
+yarn-error.log
