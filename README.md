@@ -14,9 +14,10 @@ All outputs are saved to the `.cartography/` folder inside the **Cartographer pr
 |----------|-------------|
 | `CODEBASE.md` | Living context file — inject into any AI coding agent for instant architectural awareness |
 | `onboarding_brief.md` | Five FDE Day-One answers with evidence citations |
+| `module_graph.html` | **NEW**: Interactive D3-powered import graph with physics and search |
+| `lineage_graph.html` | **NEW**: Interactive data lineage visualization (sources → transforms → sinks) |
 | `module_graph.json` | Module import graph with PageRank, circular deps, git velocity |
-| `module_importance.json` | Ranked architectural hub scores |
-| `lineage_graph.json` | Full data lineage DAG (Python + SQL + YAML) |
+| `lineage_graph.json` | Full data lineage DAG (Python + SQL + Airflow + dbt) |
 | `cartography_trace.jsonl` | Audit log of every analysis action and evidence source |
 | `last_run.json` | Metadata for incremental mode (git HEAD hash) |
 
@@ -131,14 +132,26 @@ poetry run python -m src.cli analyze /path/to/repo --incremental
 ### Query the Knowledge Graph
 
 ```bash
-# Interactive REPL
-poetry run python -m src.cli query /path/to/repo
+# Interactive LangGraph ReAct Agent (multi-step reasoning)
+poetry run python -m src.cli query /path/to/repo --langgraph
 
-# Single question
+# Standard direct query
 poetry run python -m src.cli query /path/to/repo "What produces the orders table?"
-poetry run python -m src.cli query /path/to/repo "Blast radius of src/transforms/revenue.py"
-poetry run python -m src.cli query /path/to/repo "Where is the revenue calculation logic?"
-poetry run python -m src.cli query /path/to/repo "Explain src/ingestion/loader.py"
+```
+
+### 🛰️ Interactive Visualization
+
+Render your knowledge graph as a premium, interactive HTML dashboard with physics simulation:
+
+```bash
+# Render both Module and Lineage graphs
+poetry run python -m src.cli visualize /path/to/repo
+
+# Open automatically in your default browser
+poetry run python -m src.cli visualize /path/to/repo --open
+
+# Render only lineage graph
+poetry run python -m src.cli visualize /path/to/repo --graph lineage
 ```
 
 ---
@@ -154,8 +167,11 @@ poetry run python -m src.cli query /path/to/repo "Explain src/ingestion/loader.p
 
 ### Agent 2: Hydrologist (Data Lineage)
 - Python data I/O tracking: `pandas`, `PySpark`, `SQLAlchemy`
-- SQL lineage: `sqlglot`-parsed `SELECT/FROM/JOIN/CTE` chains (PostgreSQL, BigQuery, Snowflake, DuckDB)
-- **Airflow DAG topology extraction** from Python AST (tasks, dependencies)
+- SQL lineage: `sqlglot`-parsed `SELECT/FROM/JOIN/CTE` chains
+- **Enhanced Airflow Extraction**:
+    - Automatically parses `task.table` and `task.sql` operator fields.
+    - Resolves cross-task dependencies via `>>` and `set_downstream` syntax.
+    - Wires dataset nodes (tables/S3) directly into the transformation graph.
 - dbt `schema.yml` / `sources.yml` parsing
 - Jupyter notebook data I/O extraction
 - `blast_radius()` and `upstream_lineage()` for any dataset node
@@ -175,16 +191,22 @@ poetry run python -m src.cli query /path/to/repo "Explain src/ingestion/loader.p
 
 ---
 
-## Query Interface
+### Agent 5: Navigator (ReAct Reasoning)
+- **LangGraph Integration**: Uses a ReAct loop for multi-step graph exploration.
+- **Tools**:
+    - `find_implementation(concept)`: Semantic vector search via FAISS.
+    - `trace_lineage(dataset, direction)`: Traverses the NetworkX lineage graph.
+    - `blast_radius(module_path)`: BFS traversal for impact assessment.
+    - `explain_module(path)`: Context-aware generative explanation.
 
-The Navigator supports four query types:
+---
 
-| Tool | Query Type | Example |
-|------|-----------|---------| 
-| `find_implementation(concept)` | Semantic | "Where is the revenue calculation logic?" |
-| `trace_lineage(dataset, direction)` | Graph | "What produces the daily_active_users table?" |
-| `blast_radius(module_path)` | Graph | "What breaks if I change src/transforms/revenue.py?" |
-| `explain_module(path)` | Generative | "Explain what src/ingestion/kafka_consumer.py does" |
+## 🛰️ Visualization Dashboard
+
+The visualizer generates self-contained `.html` files in `.cartography/`.
+- **Module Graph**: Nodes sized by PageRank (Architectural Hubs). Domains color-coded by LLM clustering.
+- **Lineage Graph**: Dataset (blue) and Transformation (green/purple) flows via `PRODUCES/CONSUMES` edges.
+- **Interactivity**: Zoom, pan, drag, and click any node to highlight its semantic neighborhood.
 
 ---
 
