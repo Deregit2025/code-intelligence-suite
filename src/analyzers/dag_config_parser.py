@@ -166,12 +166,30 @@ class AirflowDAGParser:
                         op_name = self._get_call_name(call)
                         if any(op_name.endswith(op) for op in operator_names) or "Operator" in op_name:
                             task_id = self._extract_kwarg(call, "task_id") or target.id
+
+                            # Extract dataset-related kwargs from the operator
+                            # Priority: destination_table > table > source_table > bucket
+                            table = (
+                                self._extract_kwarg(call, "destination_table")
+                                or self._extract_kwarg(call, "table")
+                                or self._extract_kwarg(call, "source_table")
+                                or self._extract_kwarg(call, "bucket")
+                            )
+                            sql = (
+                                self._extract_kwarg(call, "sql")
+                                or self._extract_kwarg(call, "query")
+                            )
+                            # For SQL operators the sql may be a file reference (.sql extension)
+                            # We store it as-is; Hydrologist will decide how to use it.
+
                             tasks.append(
                                 DAGTask(
                                     task_id=task_id,
                                     operator=op_name,
                                     source_file=source_file,
                                     line=node.lineno,
+                                    table=table,
+                                    sql=sql,
                                 )
                             )
         return tasks
