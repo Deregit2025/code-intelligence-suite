@@ -27,8 +27,11 @@ dependencies = [
     "dotenv (>=0.9.9,<0.10.0)",
     "tree-sitter-sql (>=0.3.11,<0.4.0)",
     "tree-sitter-yaml (>=0.7.2,<0.8.0)",
-    "langgraph (>=1.1.2,<2.0.0)",
-    "langchain (>=1.2.12,<2.0.0)"
+    "langgraph (>=0.2.0,<2.0.0)",
+    "langchain (>=0.3.0,<1.0.0)",
+    "langchain-ollama (>=0.2.0,<1.0.0)",
+    "langchain-core (>=0.3.0,<1.0.0)",
+    "pyvis (>=0.3.2,<1.0.0)"
 ]
 
 
