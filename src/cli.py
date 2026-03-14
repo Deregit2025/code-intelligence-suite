@@ -2,8 +2,9 @@
 CLI entry point for the Brownfield Cartographer.
 
 Commands:
-  analyze   Run the full (or incremental) analysis pipeline on a repo.
-  query     Launch the interactive Navigator query interface.
+  analyze    Run the full (or incremental) analysis pipeline on a repo.
+  query      Launch the interactive Navigator query interface.
+  visualize  Render interactive HTML graphs (module imports + data lineage).
 
 Examples:
   cartographer analyze https://github.com/dbt-labs/jaffle_shop
@@ -11,6 +12,8 @@ Examples:
   cartographer analyze /path/to/repo --incremental
   cartographer query /path/to/repo "What produces the orders table?"
   cartographer query /path/to/repo  # interactive REPL
+  cartographer visualize /path/to/repo
+  cartographer visualize /path/to/repo --graph lineage --open
 """
 
 from __future__ import annotations
@@ -93,7 +96,7 @@ def query(
         None, help="Question to ask (omit for interactive REPL)"
     ),
     use_langgraph: bool = typer.Option(
-        False, "--langgraph", help="Use full LangGraph ReAct agent (requires LLM key)"
+        False, "--langgraph", help="Use full LangGraph ReAct agent with local Ollama (no API key required)"
     ),
 ) -> None:
     """
@@ -162,8 +165,113 @@ def query(
 
 
 # ---------------------------------------------------------------------------
+# visualize command
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def visualize(
+    repo: str = typer.Argument(..., help="Local path to the already-analysed repository"),
+    graph: str = typer.Option(
+        "both",
+        "--graph",
+        "-g",
+        help="Which graph to render: 'module', 'lineage', or 'both'",
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output directory for HTML files (defaults to .cartography/)",
+    ),
+    open_browser: bool = typer.Option(
+        False,
+        "--open",
+        help="Open generated HTML files in the default browser automatically",
+    ),
+) -> None:
+    """
+    Render interactive graph visualizations as standalone HTML files.
+
+    Features:
+      - Zoom / pan / drag nodes
+      - Click a node to highlight its direct neighbors
+      - Hover tooltips with purpose statements, metrics, lineage info
+      - Dark-mode UI with physics simulation (Barnes-Hut / Repulsion)
+
+    Generated files can be opened directly in any browser (no server needed).
+    """
+    from src.config import CONFIG
+    from src.utils.visualizer import Visualizer
+
+    repo_path = Path(repo).resolve()
+    cartography_dir = repo_path / CONFIG.output_dir_name
+
+    if not cartography_dir.exists():
+        console.print(
+            f"[red]No cartography artifacts found at {cartography_dir}.[/red]\n"
+            "Run [bold]cartographer analyze[/bold] first."
+        )
+        raise typer.Exit(1)
+
+    try:
+        from pyvis.network import Network  # noqa: F401
+    except ImportError:
+        console.print(
+            "[red]pyvis is not installed.[/red] "
+            "Run: [bold]poetry run pip install pyvis[/bold]"
+        )
+        raise typer.Exit(1)
+
+    out_dir = output or cartography_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    graph_choice = graph.lower().strip()
+    if graph_choice not in ("module", "lineage", "both"):
+        console.print(
+            f"[red]Unknown --graph value '{graph}'. Use: module, lineage, or both.[/red]"
+        )
+        raise typer.Exit(1)
+
+    console.print(
+        f"[bold cyan]Cartographer Visualizer[/bold cyan] – "
+        f"rendering '{graph_choice}' graph(s)"
+    )
+    console.print(f"Output → [yellow]{out_dir}[/yellow]\n")
+
+    from src.graph.graph_serializers import load_knowledge_graph
+
+    kg = load_knowledge_graph(cartography_dir)
+    v = Visualizer(kg)
+    generated: list[Path] = []
+
+    if graph_choice in ("module", "both"):
+        p = out_dir / "module_graph.html"
+        with console.status("Rendering module import graph…"):
+            v.render_module_graph(p)
+        console.print(f"  \u2705 Module graph   \u2192 [green]{p}[/green]")
+        generated.append(p)
+
+    if graph_choice in ("lineage", "both"):
+        p = out_dir / "lineage_graph.html"
+        with console.status("Rendering data lineage graph…"):
+            v.render_lineage_graph(p)
+        console.print(f"  \u2705 Lineage graph  \u2192 [green]{p}[/green]")
+        generated.append(p)
+
+    console.print("\n[bold]Open in your browser:[/bold]")
+    for p in generated:
+        console.print(f"  file:///{p.resolve().as_posix()}")
+
+    if open_browser:
+        import webbrowser
+        for p in generated:
+            webbrowser.open(f"file:///{p.resolve().as_posix()}")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    app()
+    app()
