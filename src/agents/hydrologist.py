@@ -196,25 +196,133 @@ class Hydrologist:
         dags = self._airflow_parser.parse(path)
 
         for dag in dags:
+            # ---------- Build a task_id → tid map first ----------
+            tid_map: dict[str, str] = {}  # task_id → graph node id
             for task in dag.tasks:
                 tid = _make_transform_id(rel, task.line)
+                tid_map[task.task_id] = tid
+
+            for task in dag.tasks:
+                tid = tid_map[task.task_id]
+
+                # -------------------------------------------------------
+                # Determine source and target datasets for this task.
+                # Strategy:
+                #   - task.table present → it is the *target* (the task
+                #     reads into or writes to this table).  SQL operators
+                #     (PostgresOperator, BigQueryOperator, SQLExecuteQuery)
+                #     treat it as target; others as generic dataset.
+                #   - task.sql present and it references a .sql file → the
+                #     .sql file itself is noted as a source reference.
+                #   - upstream task nodes (via dependency edges) feed INTO
+                #     this task; no physical dataset names can be inferred
+                #     in that case, so we leave datasets empty and rely on
+                #     the task-to-task edges instead.
+                # -------------------------------------------------------
+                source_ds: list[str] = []
+                target_ds: list[str] = []
+
+                is_sql_op = any(
+                    kw in task.operator
+                    for kw in ("SQL", "Postgres", "BigQuery", "Redshift", "Snowflake", "Mysql")
+                )
+
+                if task.table:
+                    if is_sql_op:
+                        target_ds = [task.table]
+                    else:
+                        # For non-SQL operators (e.g. S3FileTransformOperator)
+                        # treat table/bucket as the target dataset
+                        target_ds = [task.table]
+
+                # If there's a SQL file reference, treat it as a source input
+                if task.sql and task.sql.endswith(".sql"):
+                    sql_ref = task.sql.lstrip("/").lstrip("./")
+                    source_ds = [sql_ref]
+
                 transform = TransformationNode(
                     node_id=tid,
-                    source_datasets=[],
-                    target_datasets=[],
+                    source_datasets=source_ds,
+                    target_datasets=target_ds,
                     transformation_type=f"airflow_{task.operator}",
                     source_file=rel,
                     line_range=(task.line, task.line),
                 )
                 self.kg.add_transformation(transform)
 
+                # Wire dataset → task edges (PRODUCES: dataset feeds task)
+                for ds_name in source_ds:
+                    _ensure_dataset(self.kg, ds_name, StorageType.TABLE)
+                    self.kg.add_lineage_edge(
+                        ds_name, tid, EdgeType.PRODUCES,
+                        source_file=rel, line_range=(task.line, task.line)
+                    )
+
+                # Wire task → dataset edges (CONSUMES: task writes to dataset)
+                for ds_name in target_ds:
+                    _ensure_dataset(self.kg, ds_name, StorageType.TABLE)
+                    self.kg.add_lineage_edge(
+                        tid, ds_name, EdgeType.CONSUMES,
+                        source_file=rel, line_range=(task.line, task.line)
+                    )
+
                 if self.tracer:
                     self.tracer.log(
                         agent="Hydrologist",
                         action="airflow_task_parsed",
                         target=f"{dag.dag_id}.{task.task_id}",
-                        metadata={"source_file": rel},
+                        metadata={
+                            "source_file": rel,
+                            "source_datasets": source_ds,
+                            "target_datasets": target_ds,
+                            "operator": task.operator,
+                        },
                     )
+
+            # -------------------------------------------------------
+            # Wire task-to-task dependency edges (>> relationships)
+            # These represent the DAG execution order, not data flow,
+            # but they are stored as PRODUCES edges between transformation
+            # nodes so the lineage graph captures the full pipeline topology.
+            # -------------------------------------------------------
+            for task in dag.tasks:
+                up_tid = tid_map[task.task_id]
+                for dn_task_id in task.downstream_task_ids:
+                    dn_tid = tid_map.get(dn_task_id)
+                    if dn_tid and dn_tid in self.kg.lineage_graph.G:
+                        self.kg.add_lineage_edge(
+                            up_tid, dn_tid, EdgeType.PRODUCES,
+                            source_file=rel, line_range=(0, 0)
+                        )
+
+        # -------------------------------------------------------
+        # Post-process: back-fill source_datasets / target_datasets
+        # on node attributes from actual graph adjacency.
+        # This guarantees the node-level arrays always match the edges,
+        # even for nodes whose datasets were discovered via task dependencies.
+        # -------------------------------------------------------
+        G = self.kg.lineage_graph.G
+        for dag in dags:
+            for task in dag.tasks:
+                tid = _make_transform_id(rel, task.line)
+                if tid not in G:
+                    continue
+                node_data = G.nodes[tid]
+                # predecessors that are datasets (not other transformation nodes)
+                pred_datasets = [
+                    p for p in G.predecessors(tid)
+                    if G.nodes.get(p, {}).get("node_type") == "dataset"
+                ]
+                # successors that are datasets
+                succ_datasets = [
+                    s for s in G.successors(tid)
+                    if G.nodes.get(s, {}).get("node_type") == "dataset"
+                ]
+                if pred_datasets:
+                    node_data["source_datasets"] = pred_datasets
+                if succ_datasets:
+                    node_data["target_datasets"] = succ_datasets
+
 
     def _process_dbt_schema(self, path: Path) -> None:
         rel = relative_path(path, self.repo_root)

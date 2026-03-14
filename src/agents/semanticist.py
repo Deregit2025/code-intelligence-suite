@@ -228,73 +228,159 @@ Respond with ONLY the domain name, e.g. "Data Ingestion" or "User Authentication
         """
         Synthesise the full Surveyor + Hydrologist output to answer the
         Five FDE Day-One Questions with evidence citations.
+
+        Key improvement over the original: Q3 (blast radius) is grounded by
+        *pre-computing* the actual BFS blast-radius from the reversed import
+        graph and injecting the concrete module list into the prompt, so the
+        LLM cites real evidence rather than hallucinating.  A deterministic
+        fallback further guarantees Q3 is never left blank or wrong.
         """
-        # Build context summary
         module_graph = self.kg.module_graph
         lineage_graph = self.kg.lineage_graph
 
+        # ------------------------------------------------------------------
+        # Pre-compute all structural facts
+        # ------------------------------------------------------------------
         top_modules = module_graph.top_modules_by_pagerank(5)
         sources = lineage_graph.find_sources()[:5]
         sinks = lineage_graph.find_sinks()[:5]
         circular_deps = module_graph.find_circular_dependencies()[:3]
         high_velocity = module_graph.G.graph.get("high_velocity_files", [])[:5]
 
-        # Build a condensed purpose index for the prompt
+        # Q3: actual BFS blast-radius for the most critical module ----------
+        most_critical_module = top_modules[0][0] if top_modules else None
+        blast_radius_modules: list[str] = []
+        blast_radius_datasets: list[str] = []
+
+        if most_critical_module:
+            blast_radius_modules = module_graph.blast_radius_modules(most_critical_module)
+            if most_critical_module in lineage_graph.G:
+                import networkx as _nx
+                blast_radius_datasets = list(_nx.descendants(lineage_graph.G, most_critical_module))
+
+        # Q1: sources with storage type ------------------------------------
+        source_details = [
+            f"  {s} (storage: {lineage_graph.G.nodes.get(s, {}).get('storage_type', 'unknown')})"
+            for s in sources
+        ]
+
+        # Q2: sinks with storage type --------------------------------------
+        sink_details = [
+            f"  {s} (storage: {lineage_graph.G.nodes.get(s, {}).get('storage_type', 'unknown')})"
+            for s in sinks
+        ]
+
+        # Q4: hub topology (in/out degree + rank) --------------------------
+        G = module_graph.G
+        hub_modules = [
+            f"  {p} (in_degree={G.in_degree(p)}, out_degree={G.out_degree(p)}, pagerank={s:.4f})"
+            for p, s in top_modules
+        ]
+
+        # Q5: velocity with commit counts ----------------------------------
+        velocity_details = [
+            f"  {f} ({G.nodes.get(f, {}).get('change_velocity_30d', '?')} commits in 30d)"
+            for f in high_velocity
+        ]
+
+        # Purpose sample ---------------------------------------------------
         purpose_sample = "\n".join(
             f"  {path}: {stmt[:150]}"
             for path, stmt in list(self._purpose_statements.items())[:30]
         )
 
-        context = f"""CODEBASE STRUCTURAL SUMMARY:
+        # ------------------------------------------------------------------
+        # Build grounded context with pre-computed Q3 blast-radius block
+        # ------------------------------------------------------------------
+        if most_critical_module:
+            affected_mod_list = (
+                "\n".join(f"    - {m}" for m in blast_radius_modules[:20])
+                or "    (no downstream importers detected — module is a leaf)"
+            )
+            affected_ds_list = (
+                "\n".join(f"    - {d}" for d in blast_radius_datasets[:10])
+                or "    (module not present in lineage graph)"
+            )
+            blast_radius_section = (
+                f"\nQ3 PRE-COMPUTED BLAST RADIUS [static_analysis — cite this verbatim]:\n"
+                f"  Most critical module (highest PageRank): {most_critical_module}\n"
+                f"  Modules that (transitively) import it [{len(blast_radius_modules)} total]:\n"
+                f"{affected_mod_list}\n"
+                f"  Affected downstream datasets [{len(blast_radius_datasets)} total]:\n"
+                f"{affected_ds_list}\n"
+            )
+        else:
+            blast_radius_section = "\nQ3 PRE-COMPUTED BLAST RADIUS: (no modules found in graph)\n"
 
-Top modules by PageRank (architectural hubs):
-{chr(10).join(f"  {p} (score={s:.4f})" for p, s in top_modules)}
-
-Data sources (no upstream producers):
-{chr(10).join(f"  {s}" for s in sources) or "  (none detected)"}
-
-Data sinks (terminal outputs):
-{chr(10).join(f"  s" for s in sinks) or "  (none detected)"}
-
-Circular dependencies:
-{chr(10).join(f"  {g}" for g in circular_deps) or "  (none detected)"}
-
-High-velocity files (most frequently changed):
-{chr(10).join(f"  {f}" for f in high_velocity) or "  (none detected)"}
-
-Module purpose sample:
-{purpose_sample or "  (not available)"}
-"""
+        context = (
+            "CODEBASE STRUCTURAL SUMMARY (grounded evidence — do not deviate):\n\n"
+            "Top modules by PageRank (architectural hubs, most imported):\n"
+            + ("\n".join(hub_modules) or "  (graph has no import edges — all modules are isolated)")
+            + "\n\nData ingestion sources (in-degree 0, nothing feeds them):\n"
+            + ("\n".join(source_details) or "  (none detected)")
+            + "\n\nData output sinks (out-degree 0, nothing consumes them):\n"
+            + ("\n".join(sink_details) or "  (none detected)")
+            + "\n\nCircular dependencies (import cycles):\n"
+            + ("\n".join(f"  {' -> '.join(g)}" for g in circular_deps) or "  (none detected)")
+            + "\n\nHigh-velocity files (change hotspots — likely pain points):\n"
+            + ("\n".join(velocity_details) or "  (git history unavailable)")
+            + blast_radius_section
+            + "\nModule purpose index (sample):\n"
+            + (purpose_sample or "  (run without --static-only to generate purpose statements)")
+        )
 
         questions_text = "\n".join(
             f"  {qid}: {q}" for qid, q in DAY_ONE_QUESTIONS.items()
         )
 
-        prompt = f"""{context}
-
-You are a senior data engineer conducting a 72-hour brownfield codebase assessment.
-Using the structural information above, answer each of the Five FDE Day-One Questions.
-For each answer, cite specific evidence: file paths, module names, or dataset names from the summary above.
-Be concise but precise. If information is insufficient to answer a question, state what evidence is missing.
-
-QUESTIONS:
-{questions_text}
-
-Format your response as:
-Q1: <answer with evidence>
-Q2: <answer with evidence>
-Q3: <answer with evidence>
-Q4: <answer with evidence>
-Q5: <answer with evidence>
-"""
+        prompt = (
+            context
+            + "\n\nYou are a senior data engineer conducting a 72-hour brownfield codebase assessment.\n"
+            "Using ONLY the structural information above, answer each of the Five FDE Day-One Questions.\n\n"
+            "STRICT RULES:\n"
+            "- Q3 MUST cite the pre-computed blast radius list above. Do NOT speculate.\n"
+            "- Cite specific file paths, module names, or dataset names from the summary.\n"
+            "- If data is absent for a question, say so and state what evidence is missing.\n"
+            "- Never invent names not listed in the summary above.\n\n"
+            f"QUESTIONS:\n{questions_text}\n\n"
+            "Format your response as:\n"
+            "Q1: <answer with evidence>\n"
+            "Q2: <answer with evidence>\n"
+            "Q3: <answer — MUST cite pre-computed blast radius list>\n"
+            "Q4: <answer with evidence>\n"
+            "Q5: <answer with evidence>\n"
+        )
 
         try:
-            response = self._client.complete(prompt, tier="synthesis", max_tokens=800)
+            response = self._client.complete(prompt, tier="synthesis", max_tokens=1000)
             self._parse_day_one_answers(response)
         except BudgetExceededError:
             logger.warning("[Semanticist] Token budget exceeded – Day-One answers skipped.")
         except Exception as exc:
             logger.error(f"[Semanticist] Day-One question answering failed: {exc}")
+
+        # ------------------------------------------------------------------
+        # Deterministic fallback: if LLM produced a blank/vague Q3, write
+        # the pre-computed answer directly so it is never wrong.
+        # ------------------------------------------------------------------
+        _q3 = self._day_one_answers.get("Q3", "")
+        _vague_signals = ("not explicitly", "high-velocity", "not mentioned", "insufficient")
+        if most_critical_module and (not _q3 or any(sig in _q3.lower() for sig in _vague_signals)):
+            n = len(blast_radius_modules)
+            listed = ", ".join(f"`{m}`" for m in blast_radius_modules[:5])
+            if n > 5:
+                listed += f" … ({n - 5} more)"
+            ds_suffix = (
+                f" It would also affect {len(blast_radius_datasets)} downstream datasets."
+                if blast_radius_datasets else ""
+            )
+            self._day_one_answers["Q3"] = (
+                f"If `{most_critical_module}` (PageRank={top_modules[0][1]:.4f}) fails, "
+                f"{n} module(s) that transitively import it would break: "
+                f"{listed or 'none — this module has no importers'}.{ds_suffix} "
+                f"[evidence: static_analysis / BFS on reversed import graph]"
+            )
+            logger.info("[Semanticist] Q3 set via deterministic fallback (blast-radius BFS).")
 
     def _parse_day_one_answers(self, response: str) -> None:
         for qid in DAY_ONE_QUESTIONS:

@@ -12,6 +12,11 @@ Tools:
 
 Every answer cites evidence: source file, line range, and analysis method
 (static_analysis vs llm_inference).
+
+LangGraph mode:
+  Uses ChatOllama (langchain-ollama) so it works entirely locally with
+  whatever model is configured in OLLAMA_MODEL / BULK_LLM_MODEL in .env.
+  Falls back to a fast direct-dispatch router if LangGraph is not installed.
 """
 
 from __future__ import annotations
@@ -278,7 +283,8 @@ class Navigator:
     Interactive query interface.
 
     In full LangGraph mode, wraps NavigatorTools as LangChain tools and runs
-    a ReAct loop.  Falls back to a simple direct-dispatch mode if LangGraph
+    a ReAct loop powered by ChatOllama (local, no API key required).
+    Falls back to a simple direct-dispatch mode if LangGraph / langchain-ollama
     is unavailable.
     """
 
@@ -290,7 +296,7 @@ class Navigator:
         self._client = get_llm_client()
 
     # ------------------------------------------------------------------
-    # Direct dispatch (used by CLI query subcommand)
+    # Direct dispatch (used by CLI query subcommand without --langgraph)
     # ------------------------------------------------------------------
 
     def query(self, user_query: str) -> str:
@@ -322,59 +328,124 @@ class Navigator:
             return self._format_find(result)
 
     # ------------------------------------------------------------------
-    # LangGraph agent (optional, richer multi-step reasoning)
+    # LangGraph ReAct agent  (--langgraph CLI flag)
     # ------------------------------------------------------------------
 
     def run_langgraph_agent(self, user_query: str) -> str:
         """
-        Run a full LangGraph ReAct agent if dependencies are available.
-        Falls back to direct dispatch if not.
+        Run a full LangGraph ReAct agent backed by ChatOllama.
+        Falls back to direct dispatch if LangGraph / langchain-ollama are
+        not installed or if Ollama is unreachable.
         """
         try:
             return self._run_with_langgraph(user_query)
-        except ImportError:
-            logger.debug("LangGraph not available – using direct dispatch.")
+        except ImportError as exc:
+            logger.warning(f"LangGraph/langchain-ollama not available – using direct dispatch. ({exc})")
+            return self.query(user_query)
+        except Exception as exc:
+            logger.warning(f"LangGraph agent failed – falling back to direct dispatch: {exc}")
             return self.query(user_query)
 
     def _run_with_langgraph(self, user_query: str) -> str:
-        from langchain.tools import tool as lc_tool
-        from langgraph.prebuilt import create_react_agent
-        from langchain_openai import ChatOpenAI
+        """
+        Internal: build the LangGraph ReAct agent with ChatOllama and invoke it.
+
+        Model / URL are driven entirely by CONFIG (read from .env):
+          OLLAMA_BASE_URL  → e.g. http://127.0.0.1:11434
+          BULK_LLM_MODEL   → e.g. qwen2.5:0.5b
+        """
+        from langchain_ollama import ChatOllama          # type: ignore
+        from langchain_core.tools import tool as lc_tool  # type: ignore
+        from langgraph.prebuilt import create_react_agent  # type: ignore
 
         nav_tools_instance = self.tools
 
+        # ------------------------------------------------------------------
+        # Declare the four tools as LangChain @tool functions
+        # ------------------------------------------------------------------
+
         @lc_tool
         def find_implementation(concept: str) -> str:
-            """Find where a concept or business logic is implemented."""
-            return json.dumps(nav_tools_instance.find_implementation(concept), indent=2)
+            """
+            Find where a concept or business logic is implemented in the codebase.
+            Use this when the user asks 'where is X implemented?' or 'which module
+            handles Y?'. Input should be a short description of the concept.
+            """
+            return json.dumps(
+                nav_tools_instance.find_implementation(concept), indent=2, default=str
+            )
 
         @lc_tool
         def trace_lineage(dataset: str, direction: str = "upstream") -> str:
-            """Trace the data lineage for a dataset upstream or downstream."""
-            return json.dumps(nav_tools_instance.trace_lineage(dataset, direction), indent=2)
+            """
+            Trace the data lineage for a dataset.
+            Use this when the user asks 'what produces X?' (upstream) or
+            'what does X feed into?' (downstream).
+            direction must be one of: 'upstream', 'downstream', or 'both'.
+            """
+            return json.dumps(
+                nav_tools_instance.trace_lineage(dataset, direction), indent=2, default=str
+            )
 
         @lc_tool
         def blast_radius(module_path: str) -> str:
-            """Find what breaks if this module changes."""
-            return json.dumps(nav_tools_instance.blast_radius(module_path), indent=2)
+            """
+            Find what modules and datasets would break if this module changes.
+            Use this when the user asks 'what breaks if I change X?' or
+            'what is the impact of modifying Y?'.
+            Input should be a repo-relative file path, e.g. 'src/utils/file_utils.py'.
+            """
+            return json.dumps(
+                nav_tools_instance.blast_radius(module_path), indent=2, default=str
+            )
 
         @lc_tool
         def explain_module(path: str) -> str:
-            """Explain what a module does."""
-            return json.dumps(nav_tools_instance.explain_module(path), indent=2)
+            """
+            Explain what a module does in plain English.
+            Use this when the user asks 'explain X', 'what does Y do?', or
+            'describe the purpose of Z'.
+            Input should be a repo-relative file path, e.g. 'src/agents/surveyor.py'.
+            """
+            return json.dumps(
+                nav_tools_instance.explain_module(path), indent=2, default=str
+            )
 
-        llm = ChatOpenAI(
-            model=CONFIG.llm.synthesis_model,
-            api_key=CONFIG.llm.openai_api_key,
+        # ------------------------------------------------------------------
+        # Build ChatOllama from CONFIG (reads BULK_LLM_MODEL and OLLAMA_BASE_URL)
+        # ------------------------------------------------------------------
+        # Determine model: prefer BULK_LLM_MODEL when provider is ollama,
+        # fall back to OLLAMA_MODEL, then 'qwen2.5:0.5b' as hard default.
+        if CONFIG.llm.bulk_provider == "ollama":
+            model_name = CONFIG.llm.bulk_model
+        else:
+            model_name = CONFIG.llm.ollama_model or "qwen2.5:0.5b"
+
+        base_url = CONFIG.llm.ollama_base_url  # e.g. http://127.0.0.1:11434
+
+        logger.info(f"[Navigator] LangGraph agent using ChatOllama model={model_name} base_url={base_url}")
+
+        llm = ChatOllama(
+            model=model_name,
+            base_url=base_url,
+            temperature=0,          # Deterministic for tool-calling
+            num_predict=512,        # Keep responses concise
         )
-        agent = create_react_agent(
-            llm, [find_implementation, trace_lineage, blast_radius, explain_module]
-        )
+
+        # ------------------------------------------------------------------
+        # Assemble and invoke the ReAct agent
+        # ------------------------------------------------------------------
+        tools_list = [find_implementation, trace_lineage, blast_radius, explain_module]
+        agent = create_react_agent(llm, tools_list)
+
         result = agent.invoke({"messages": [("user", user_query)]})
         messages = result.get("messages", [])
         if messages:
-            return messages[-1].content
-        return "(No response)"
+            last = messages[-1]
+            # LangChain messages expose content as .content attribute
+            content = getattr(last, "content", None) or str(last)
+            return content
+        return "(No response from LangGraph agent)"
 
     # ------------------------------------------------------------------
     # Formatting helpers
@@ -418,7 +489,7 @@ class Navigator:
         lines = [
             f"**`{path}`**",
             f"Domain: {domain} | Change velocity (30d): {velocity} commits",
-            *(["⚠️ Documentation drift detected"] if drift else []),
+            *([" Documentation drift detected"] if drift else []),
             "",
             explanation,
             "",
@@ -443,7 +514,6 @@ class Navigator:
     # ------------------------------------------------------------------
 
     def _extract_dataset(self, query: str) -> str:
-        # Look for quoted strings or CamelCase/snake_case identifiers
         import re
         m = re.search(r'["\']([^"\']+)["\']', query)
         if m:
