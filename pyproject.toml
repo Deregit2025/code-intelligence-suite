@@ -24,7 +24,11 @@ dependencies = [
     "sentence-transformers (>=5.2.3,<6.0.0)",
     "requests (>=2.32.5,<3.0.0)",
     "gitpython (>=3.1.46,<4.0.0)",
-    "dotenv (>=0.9.9,<0.10.0)"
+    "dotenv (>=0.9.9,<0.10.0)",
+    "tree-sitter-sql (>=0.3.11,<0.4.0)",
+    "tree-sitter-yaml (>=0.7.2,<0.8.0)",
+    "langgraph (>=1.1.2,<2.0.0)",
+    "langchain (>=1.2.12,<2.0.0)"
 ]
 
 
