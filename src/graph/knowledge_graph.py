@@ -79,7 +79,7 @@ class ModuleGraph:
             return []
         # Reverse graph: edges point from target to source
         rev = self.G.reverse(copy=False)
-        return list(nx.bfs_tree(rev, module_path).nodes()) - {module_path}  # type: ignore
+        return [n for n in nx.bfs_tree(rev, module_path).nodes() if n != module_path]
 
     def nodes_data(self) -> dict[str, Any]:
         return dict(self.G.nodes(data=True))
