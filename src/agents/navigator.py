@@ -414,35 +414,69 @@ class Navigator:
         # ------------------------------------------------------------------
         # Build ChatOllama from CONFIG (reads BULK_LLM_MODEL and OLLAMA_BASE_URL)
         # ------------------------------------------------------------------
-        # Determine model: prefer BULK_LLM_MODEL when provider is ollama,
-        # fall back to OLLAMA_MODEL, then 'qwen2.5:0.5b' as hard default.
         if CONFIG.llm.bulk_provider == "ollama":
             model_name = CONFIG.llm.bulk_model
         else:
             model_name = CONFIG.llm.ollama_model or "qwen2.5:0.5b"
 
-        base_url = CONFIG.llm.ollama_base_url  # e.g. http://127.0.0.1:11434
+        base_url = CONFIG.llm.ollama_base_url
 
         logger.info(f"[Navigator] LangGraph agent using ChatOllama model={model_name} base_url={base_url}")
 
         llm = ChatOllama(
             model=model_name,
             base_url=base_url,
-            temperature=0,          # Deterministic for tool-calling
-            num_predict=512,        # Keep responses concise
+            temperature=0,
+            num_predict=1024,       # Increased: small models need room to reason through tool calls
         )
 
         # ------------------------------------------------------------------
-        # Assemble and invoke the ReAct agent
+        # Build a grounded system prompt from real graph statistics
+        # ------------------------------------------------------------------
+        kg_summary = self.kg.summary()
+        repo_root_name = str(self.kg.module_graph.G.graph.get("repo_root", "this repository"))
+        top_modules = self.kg.module_graph.G.graph.get("top_pagerank_modules", [])[:5]
+        n_modules = kg_summary.get("modules", 0)
+        n_transforms = kg_summary.get("transformations", 0)
+        n_datasets = kg_summary.get("datasets", 0)
+        n_lineage_edges = kg_summary.get("lineage_edges", 0)
+        semantic_available = self.semantic_store is not None and self.semantic_store.count() > 0
+
+        top_modules_str = ", ".join(top_modules) if top_modules else "(none identified)"
+
+        system_prompt = f"""You are a code intelligence agent that has ALREADY fully analyzed the following repository:
+  Repository: {repo_root_name}
+
+You have access to a pre-built knowledge base containing:
+  - Module Graph: {n_modules} modules with import edges and PageRank scores
+  - Lineage Graph: {n_datasets} datasets and {n_transforms} transformations with {n_lineage_edges} edges
+  - Semantic Index: {'available' if semantic_available else 'not available'}
+  - Top architectural hubs (by PageRank): {top_modules_str}
+
+You MUST follow these rules:
+1. ALWAYS use a tool before answering. Never answer from memory.
+2. NEVER say 'I need more details about your codebase' — it is fully indexed.
+3. NEVER say 'I don't know which files are involved' — use find_implementation to locate them.
+4. If a tool returns empty results, say so explicitly and explain what that means (e.g. no import edges found).
+5. Always cite the source file and line range from tool output in your answer.
+6. Be concise and precise. Avoid generic statements.
+
+Available tools:
+- find_implementation(concept): semantic search over the codebase — finds which modules implement a concept
+- trace_lineage(dataset, direction): graph traversal — traces data upstream or downstream
+- blast_radius(module_path): impact analysis — finds what breaks if a module changes
+- explain_module(path): explains what a specific file does using its stored LLM summary"""
+
+        # ------------------------------------------------------------------
+        # Assemble and invoke the ReAct agent with grounded system prompt
         # ------------------------------------------------------------------
         tools_list = [find_implementation, trace_lineage, blast_radius, explain_module]
-        agent = create_react_agent(llm, tools_list)
+        agent = create_react_agent(llm, tools_list, state_modifier=system_prompt)
 
         result = agent.invoke({"messages": [("user", user_query)]})
         messages = result.get("messages", [])
         if messages:
             last = messages[-1]
-            # LangChain messages expose content as .content attribute
             content = getattr(last, "content", None) or str(last)
             return content
         return "(No response from LangGraph agent)"
